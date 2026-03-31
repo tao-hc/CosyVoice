@@ -491,18 +491,34 @@ class HiFTGenerator(nn.Module):
     def _stft(self, x):
         spec = torch.stft(
             x,
-            self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window.to(x.device),
+            self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"],
+            window=self.stft_window.to(x.device),
             return_complex=True)
         spec = torch.view_as_real(spec)  # [B, F, TT, 2]
         return spec[..., 0], spec[..., 1]
 
     def _istft(self, magnitude, phase):
+        n_fft = self.istft_params["n_fft"]
+        hop_len = self.istft_params["hop_len"]
         magnitude = torch.clip(magnitude, max=1e2)
         real = magnitude * torch.cos(phase)
         img = magnitude * torch.sin(phase)
-        inverse_transform = torch.istft(torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"],
-                                        self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device))
-        return inverse_transform
+        complex_spec = torch.complex(real, img)
+        frames = torch.fft.irfft(complex_spec, n=n_fft, dim=1)
+        window = self.stft_window.to(frames.device, frames.dtype)
+        frames = frames * window[:, None]
+        B, N, T = frames.shape
+        output_length = n_fft + hop_len * (T - 1)
+        offsets = torch.arange(T, device=frames.device) * hop_len
+        indices = torch.arange(n_fft, device=frames.device).unsqueeze(1) + offsets.unsqueeze(0)
+        idx = indices.unsqueeze(0).expand(B, -1, -1).reshape(B, -1)
+        output = torch.zeros(B, output_length, device=frames.device, dtype=frames.dtype)
+        output.scatter_add_(1, idx, frames.reshape(B, -1))
+        win_sq = window ** 2
+        win_sum = torch.zeros(output_length, device=frames.device, dtype=frames.dtype)
+        win_sq_rep = win_sq.unsqueeze(1).expand(-1, T).reshape(-1)
+        win_sum.scatter_add_(0, indices.reshape(-1), win_sq_rep)
+        return output / torch.clamp(win_sum.unsqueeze(0), min=1e-11)
 
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
@@ -556,14 +572,12 @@ class HiFTGenerator(nn.Module):
 
     @torch.inference_mode()
     def inference(self, speech_feat: torch.Tensor, cache_source: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
-        # mel->f0
         f0 = self.f0_predictor(speech_feat)
-        # f0->source
-        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
+        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)
         s, _, _ = self.m_source(s)
         s = s.transpose(1, 2)
-        # use cache_source to avoid glitch
         if cache_source.shape[2] != 0:
+            cache_source = cache_source.to(s.device)
             s[:, :, :cache_source.shape[2]] = cache_source
         generated_speech = self.decode(x=speech_feat, s=s)
         return generated_speech, s
@@ -712,11 +726,10 @@ class CausalHiFTGenerator(HiFTGenerator):
 
     @torch.inference_mode()
     def inference(self, speech_feat: torch.Tensor, finalize: bool = True) -> torch.Tensor:
-        # mel->f0 NOTE f0_predictor precision is crucial for causal inference, move self.f0_predictor to cpu if necessary
-        self.f0_predictor.to(torch.float64)
-        f0 = self.f0_predictor(speech_feat.to(torch.float64), finalize=finalize).to(speech_feat)
-        # f0->source
-        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
+        self.f0_predictor.cpu().to(torch.float64)
+        f0 = self.f0_predictor(speech_feat.cpu().to(torch.float64), finalize=finalize)
+        f0 = f0.to(device=speech_feat.device, dtype=speech_feat.dtype)
+        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)
         s, _, _ = self.m_source(s)
         s = s.transpose(1, 2)
         if finalize is True:
