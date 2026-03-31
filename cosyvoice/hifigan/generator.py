@@ -726,9 +726,8 @@ class CausalHiFTGenerator(HiFTGenerator):
 
     @torch.inference_mode()
     def inference(self, speech_feat: torch.Tensor, finalize: bool = True) -> torch.Tensor:
-        self.f0_predictor.cpu().to(torch.float64)
-        f0 = self.f0_predictor(speech_feat.cpu().to(torch.float64), finalize=finalize)
-        f0 = f0.to(device=speech_feat.device, dtype=speech_feat.dtype)
+        # f0_predictor: fp32 is sufficient (empirically verified against fp64 baseline)
+        f0 = self.f0_predictor(speech_feat.float(), finalize=finalize).to(speech_feat)
         s = self.f0_upsamp(f0[:, None]).transpose(1, 2)
         s, _, _ = self.m_source(s)
         s = s.transpose(1, 2)

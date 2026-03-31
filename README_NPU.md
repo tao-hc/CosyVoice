@@ -39,5 +39,6 @@ python run_npu.py
 
 1. **transformers 版本**: 必须使用 4.51.3，5.x 版本会导致 Qwen2 LLM 生成的 speech tokens 失真
 2. **iSTFT**: 用 `torch.fft.irfft` + `scatter_add` 替代 `torch.istft`（NPU 不支持 fold 算子），全程在 NPU 上执行
-3. **float64**: CausalHiFTGenerator 的 f0_predictor 需要 float64，仅此模块在 CPU 上执行
-4. **推理性能**: fp16 模式下 RTF ≈ 1.5-1.8（除首次含编译开销外）
+3. **f0_predictor**: 从原始 fp64 改为 fp32，全程 NPU 执行（实测精度无损）
+4. **推理性能**: fp16 模式下 warmup 后 RTF ≈ 1.7-1.9
+5. **empty_cache**: NPU 的 empty_cache 默认关闭以避免同步开销，需要时设置 `export COSYVOICE_NPU_EMPTY_CACHE=1`

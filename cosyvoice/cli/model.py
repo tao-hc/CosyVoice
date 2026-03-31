@@ -52,9 +52,10 @@ def _empty_cache(device):
         torch.cuda.empty_cache()
         torch.cuda.current_stream().synchronize()
     elif device.type == 'npu':
-        import torch_npu
-        torch.npu.empty_cache()
-        torch.npu.current_stream().synchronize()
+        if os.environ.get('COSYVOICE_NPU_EMPTY_CACHE', '0') == '1':
+            import torch_npu
+            torch.npu.empty_cache()
+            torch.npu.current_stream().synchronize()
 
 
 class CosyVoiceModel:
@@ -177,7 +178,6 @@ class CosyVoiceModel:
                                                                       embedding=embedding.to(self.device),
                                                                       flow_cache=self.flow_cache_dict[uuid])
 
-        tts_mel = tts_mel.float()
         if self.mel_overlap_dict[uuid].shape[2] != 0:
             tts_mel = fade_in_out(tts_mel, self.mel_overlap_dict[uuid], self.mel_window)
         if self.hift_cache_dict[uuid] is not None:
@@ -328,7 +328,6 @@ class CosyVoice2Model(CosyVoiceModel):
                                              embedding=embedding.to(self.device),
                                              streaming=stream,
                                              finalize=finalize)
-        tts_mel = tts_mel.float()
         tts_mel = tts_mel[:, :, token_offset * self.flow.token_mel_ratio:]
         if self.hift_cache_dict[uuid] is not None:
             hift_cache_mel, hift_cache_source = self.hift_cache_dict[uuid]['mel'], self.hift_cache_dict[uuid]['source']
@@ -456,7 +455,6 @@ class CosyVoice3Model(CosyVoice2Model):
                                              embedding=embedding.to(self.device),
                                              streaming=stream,
                                              finalize=finalize)
-        tts_mel = tts_mel.float()
         tts_mel = tts_mel[:, :, token_offset * self.flow.token_mel_ratio:]
         if self.hift_cache_dict[uuid] is not None:
             hift_cache_mel = self.hift_cache_dict[uuid]['mel']

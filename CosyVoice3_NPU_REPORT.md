@@ -41,12 +41,12 @@
 
 - `set_all_random_seed()` 增加 `torch.npu.manual_seed_all(seed)`
 
-### 5. `cosyvoice/hifigan/generator.py` — iSTFT 纯 NPU 实现 + HiFT 去 CPU 回退
+### 5. `cosyvoice/hifigan/generator.py` — iSTFT 纯 NPU 实现 + HiFT 全 NPU
 
 - `HiFTGenerator._istft()`: 用 `torch.fft.irfft` + `scatter_add` 重写 overlap-add，替代 `torch.istft`（因 NPU 不支持 `aclnnUnfoldGrad`/`fold` 算子）
 - `HiFTGenerator._stft()`: 保持 `torch.stft`（NPU 支持前向 `unfold`）
 - `HiFTGenerator.inference()`: 移除整体 `self.cpu()` 搬迁，全程在 NPU 执行
-- `CausalHiFTGenerator.inference()`: 仅 f0_predictor 在 CPU 以 float64 计算（NPU 不支持 double），其余（m_source、decode、conv）全在 NPU
+- `CausalHiFTGenerator.inference()`: f0_predictor 改为 fp32（原 fp64，实测精度无损），全程 NPU 执行，无 CPU 回退
 
 ## 关键问题记录
 
@@ -61,9 +61,9 @@
 
 **修复**: 锁定 `transformers==4.51.3`，配套 `tokenizers>=0.21,<0.22` 和 `huggingface-hub>=0.30.0,<1.0`。
 
-### NPU 不支持 float64
+### f0_predictor 精度
 
-`CausalHiFTGenerator`（CosyVoice3 的 vocoder）的 `f0_predictor` 需要 float64 精度。NPU 不支持 double，会自动降为 float32（触发 warning）。但原代码已内置 `self.cpu()` 搬迁逻辑，实际在 CPU 上以 float64 运行，不影响精度。
+原代码要求 `CausalHiFTGenerator` 的 `f0_predictor` 使用 float64。实测 fp32 精度无损（音频 std 差异 < 0.0002），已改为 fp32 在 NPU 上直接运行，无需 CPU 回退。
 
 ### NPU 不支持 torch.istft
 
@@ -73,12 +73,12 @@
 
 | 测试项 | 推理时间 | 音频时长 | RTF |
 |------|------|------|------|
-| zero_shot (中文) | 15.34s | 9.04s | 1.696 |
-| zero_shot (English) | 9.57s | 4.52s | 2.118 |
-| cross_lingual | 8.06s | 4.16s | 1.938 |
-| instruct | 8.73s | 5.16s | 1.692 |
+| zero_shot (中文) | 15.65s | 9.04s | 1.731 |
+| zero_shot (English) | 8.42s | 4.52s | 1.862 |
+| cross_lingual | 8.07s | 4.16s | 1.941 |
+| instruct | 9.06s | 5.16s | 1.755 |
 
-3 次 warmup 后平均 RTF ≈ **1.86**。
+3 次 warmup 后平均 RTF ≈ **1.82**。
 
 ## 优化效果
 
@@ -86,11 +86,12 @@
 |------|------|------|------|
 | 基线 (fp32 + HiFT CPU 回退) | 41.72s | 4.31 | 1.00x |
 | + fp16 autocast | 37.65s | 4.16 | 1.04x |
-| + iSTFT NPU 实现 + 去 CPU 回退 | 15.34s (warmup 后) | 1.70 | **2.54x** |
+| + iSTFT NPU + f0 fp32 + 去 CPU 回退 | 15.65s (warmup 后) | 1.73 | **2.49x** |
 
-- fp16 autocast 对 LLM（Qwen2）和 Flow（DiT）生效，HiFT 仍用 float32
+- fp16 autocast 对 LLM（Qwen2）和 Flow（DiT）生效
 - 自定义 iSTFT（`irfft` + `scatter_add`）替代 `torch.istft`，避免 NPU 不支持的 `fold` 算子
-- 仅 f0_predictor 保留在 CPU（需 float64 精度）
+- f0_predictor 从 fp64@CPU 改为 fp32@NPU（实测精度无损）
+- `_empty_cache` NPU 部分默认关闭，通过 `COSYVOICE_NPU_EMPTY_CACHE=1` 环境变量开启，减少同步开销
 
 ## 依赖版本锁定
 
