@@ -25,6 +25,7 @@ import grpc
 import torch
 import numpy as np
 from cosyvoice.utils.file_utils import load_wav
+import time
 
 
 def main():
@@ -44,6 +45,8 @@ def main():
             zero_shot_request.prompt_text = args.prompt_text
             prompt_speech = load_wav(args.prompt_wav, 16000)
             zero_shot_request.prompt_audio = (prompt_speech.numpy() * (2**15)).astype(np.int16).tobytes()
+            # 关键：需要定义 proto 中 zeroshotRequest 有 stream 字段
+            zero_shot_request.stream = args.stream
             request.zero_shot_request.CopyFrom(zero_shot_request)
         elif args.mode == 'cross_lingual':
             logging.info('send cross_lingual request')
@@ -52,6 +55,13 @@ def main():
             prompt_speech = load_wav(args.prompt_wav, 16000)
             cross_lingual_request.prompt_audio = (prompt_speech.numpy() * (2**15)).astype(np.int16).tobytes()
             request.cross_lingual_request.CopyFrom(cross_lingual_request)
+        elif args.mode == 'zero_shot_by_id':
+            logging.info('send zero_shot_by_id request')
+            zero_shot_by_id_request = cosyvoice_pb2.zeroshotByIdRequest()
+            zero_shot_by_id_request.tts_text = args.tts_text
+            zero_shot_by_id_request.spk_id = args.spk_id
+            zero_shot_by_id_request.stream = args.stream
+            request.zero_shot_by_id_request.CopyFrom(zero_shot_by_id_request)
         else:
             logging.info('send instruct request')
             instruct_request = cosyvoice_pb2.instructRequest()
@@ -80,7 +90,7 @@ if __name__ == "__main__":
                         default='50000')
     parser.add_argument('--mode',
                         default='sft',
-                        choices=['sft', 'zero_shot', 'cross_lingual', 'instruct'],
+                        choices=['sft', 'zero_shot', 'cross_lingual', 'instruct', 'zero_shot_by_id'],
                         help='request mode')
     parser.add_argument('--tts_text',
                         type=str,
@@ -101,6 +111,10 @@ if __name__ == "__main__":
     parser.add_argument('--tts_wav',
                         type=str,
                         default='demo.wav')
+    # 新增 stream 开关
+    parser.add_argument('--stream', 
+                        action='store_true', 
+                        help='whether to use streaming inference')
     args = parser.parse_args()
-    prompt_sr, target_sr = 16000, 22050
+    prompt_sr, target_sr = 16000, 24000
     main()

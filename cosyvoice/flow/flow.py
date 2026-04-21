@@ -20,7 +20,7 @@ from torch.nn import functional as F
 from omegaconf import DictConfig
 from cosyvoice.utils.mask import make_pad_mask
 from cosyvoice.utils.onnx import SpeechTokenExtractor, online_feature, onnx_path
-
+import torchair
 
 class MaskedDiffWithXvec(torch.nn.Module):
     def __init__(self,
@@ -376,7 +376,8 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
                   prompt_feat_len,
                   embedding,
                   streaming,
-                  finalize):
+                  finalize,
+                  n_timesteps=None):
         assert token.shape[0] == 1
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
@@ -406,7 +407,7 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
             mask=mask.unsqueeze(1),
             spks=embedding,
             cond=conds,
-            n_timesteps=10,
+            n_timesteps=10 if n_timesteps is None else n_timesteps,
             streaming=streaming
         )
         feat = feat[:, :, mel_len1:]

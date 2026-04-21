@@ -18,7 +18,9 @@ import torch.nn.functional as F
 import torchaudio
 
 from x_transformers.x_transformers import apply_rotary_pos_emb
-
+import torch_npu
+from cosyvoice.utils.file_utils import logging
+import math
 
 # raw wav to mel spec
 class MelSpec(nn.Module):
@@ -84,7 +86,12 @@ class SinusPositionEmbedding(nn.Module):
 
 
 # convolutional position embedding
-
+class Mish(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        return x * torch.tanh(torch.log(1 + torch.exp(x)))
 
 class ConvPositionEmbedding(nn.Module):
     def __init__(self, dim, kernel_size=31, groups=16):
@@ -92,9 +99,9 @@ class ConvPositionEmbedding(nn.Module):
         assert kernel_size % 2 != 0
         self.conv1d = nn.Sequential(
             nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2),
-            nn.Mish(),
+            Mish(),
             nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2),
-            nn.Mish(),
+            Mish(),
         )
 
     def forward(self, x: float["b n d"], mask: bool["b n"] | None = None):  # noqa: F722
@@ -119,11 +126,11 @@ class CausalConvPositionEmbedding(nn.Module):
         self.kernel_size = kernel_size
         self.conv1 = nn.Sequential(
             nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=0),
-            nn.Mish(),
+            Mish(),
         )
         self.conv2 = nn.Sequential(
             nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=0),
-            nn.Mish(),
+            Mish(),
         )
 
     def forward(self, x: float["b n d"], mask: bool["b n"] | None = None):  # noqa: F722
@@ -388,7 +395,18 @@ class AttnProcessor:
         else:
             attn_mask = None
 
-        x = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+        #x = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+        atten_mask_npu = torch.logical_not(attn_mask)  # atten_mask需要取反
+        head_num = query.shape[1]
+        x = torch_npu.npu_fusion_attention(
+                       query, key, value, head_num, input_layout="BNSD", 
+                       pse=None,
+                       atten_mask=atten_mask_npu,
+                       scale=1.0 / math.sqrt(query.shape[-1]),
+                       pre_tockens=2147483647,
+                       next_tockens=2147483647,
+                       keep_prob=1
+                   )[0]
         x = x.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         x = x.to(query.dtype)
 

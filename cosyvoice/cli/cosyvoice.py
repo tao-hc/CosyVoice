@@ -22,6 +22,10 @@ from cosyvoice.cli.frontend import CosyVoiceFrontEnd
 from cosyvoice.cli.model import CosyVoiceModel, CosyVoice2Model, CosyVoice3Model
 from cosyvoice.utils.file_utils import logging
 from cosyvoice.utils.class_utils import get_model_type
+from cosyvoice.utils.file_utils import load_wav
+import datetime
+import torchaudio
+import uuid
 
 
 class CosyVoice:
@@ -190,7 +194,8 @@ class CosyVoice2(CosyVoice):
 
 class CosyVoice3(CosyVoice2):
 
-    def __init__(self, model_dir, load_trt=False, load_vllm=False, fp16=False, trt_concurrent=1):
+    def __init__(self, model_dir, load_trt=False, load_vllm=False, fp16=False, trt_concurrent=1,
+                 speaker_info_dir=None, graph_mode=False):
         self.model_dir = model_dir
         self.fp16 = fp16
         if not os.path.exists(model_dir):
@@ -212,7 +217,8 @@ class CosyVoice3(CosyVoice2):
         if not _has_accelerator and (load_trt is True or fp16 is True):
             load_trt, fp16 = False, False
             logging.warning('no cuda/npu device, set load_trt/fp16 to False')
-        self.model = CosyVoice3Model(configs['llm'], configs['flow'], configs['hift'], fp16)
+        self.model = CosyVoice3Model(configs['llm'], configs['flow'], configs['hift'], fp16,
+                                     model_dir=model_dir, graph_mode=graph_mode)
         self.model.load('{}/llm.pt'.format(model_dir),
                         '{}/flow.pt'.format(model_dir),
                         '{}/hift.pt'.format(model_dir))
@@ -226,6 +232,94 @@ class CosyVoice3(CosyVoice2):
                                 trt_concurrent,
                                 self.fp16)
         del configs
+
+        # 设置speaker_info目录
+        self.speaker_info_dir = speaker_info_dir or os.path.join(model_dir, 'speaker_info')
+        if not os.path.exists(self.speaker_info_dir):
+            assert False
+            logging.warning(f'speaker_info_dir {self.speaker_info_dir} does not exist')
+
+        # 预加载所有说话人信息
+        self.promote_wave_info = {}
+        self._preload_all_wave_info()
+
+    def _preload_all_wave_info(self):
+        """预加载所有说话人信息（从统一的JSON文件）"""
+        if not os.path.exists(self.speaker_info_dir):
+            return
+
+        import json
+
+        # 查找speaker_info.json文件
+        speaker_info_file = os.path.join(self.speaker_info_dir, 'speaker_info.json')
+        if not os.path.exists(speaker_info_file):
+            logging.warning(f'speaker_info.json not found in {self.speaker_info_dir}')
+            return
+
+        try:
+            with open(speaker_info_file, 'r', encoding='utf-8') as f:
+                all_speakers = json.load(f)
+
+            # 加载每个说话人的音频
+            for spk_id, wave_info in all_speakers.items():
+                try:
+                    # 加载音频文件
+                    prompt_wav_path = os.path.join(self.speaker_info_dir, wave_info['prompt_wav'])
+                    if os.path.exists(prompt_wav_path):
+                        prompt_wav = load_wav(wave_info['prompt_wav'], 16000)
+                        wave_info['prompt_wav'] = prompt_wav
+                        self.promote_wave_info[spk_id] = wave_info
+                        logging.info(f"Loaded speaker {spk_id} from {prompt_wav_path}, promote={wave_info['prompt_text']}")
+                    else:
+                        logging.error(f'Audio file not found for speaker {spk_id}: {prompt_wav_path}')
+                except Exception as e:
+                    logging.error(f'Failed to load speaker {spk_id}: {e}')
+
+            logging.info(f'Preloaded {len(self.promote_wave_info)} speakers from {speaker_info_file}')
+
+        except Exception as e:
+            logging.error(f'Failed to load {speaker_info_file}: {e}')
+
+    def inference_zero_shot_by_id(self, tts_text, spk_id, stream=False, speed=1.0, text_frontend=True):
+        """使用预定义的说话人ID执行zero_shot推理"""
+        # 从缓存中获取说话人信息
+        if spk_id not in self.promote_wave_info:
+            raise ValueError(f'Speaker ID {spk_id} not found. Available IDs: {list(self.promote_wave_info.keys())}')
+        wave_info = self.promote_wave_info[spk_id]
+        
+        # 0.save audio
+        #audio_uuid = str(uuid.uuid1())
+        # 缓存相关信息
+        if spk_id not in self.frontend.spk2info:
+            self.add_zero_shot_spk(wave_info['prompt_text'], wave_info['prompt_wav'], spk_id)
+
+        # 使用zero_shot接口进行推理
+        # 1.save audio
+        #res = torch.tensor([])
+        for i in tqdm(self.frontend.text_normalize(tts_text, split=True, text_frontend=text_frontend)):
+            print(f'thc: inference_zero_shot_by_id: {i}')
+            model_input = self.frontend.frontend_zero_shot(i, wave_info['prompt_text'], wave_info['prompt_wav'], self.sample_rate, spk_id)
+            start_time = time.time()
+            logging.info('synthesis text {}'.format(i))
+            for model_output in self.model.tts(**model_input, stream=stream, speed=speed):
+                speech_len = model_output['tts_speech'].shape[1] / self.sample_rate
+                logging.info('yield speech len {}, rtf {}'.format(speech_len, (time.time() - start_time) / speech_len))
+                # 2.save audio
+                #res = torch.cat((res, model_output['tts_speech']), dim=1)
+                yield model_output
+                start_time = time.time()
+        # 3.save audio
+        #now_time = datetime.datetime.today().strftime("%Y-%m-%d-%H-%M-%S")
+        #torchaudio.save(f'./server-audio/{now_time}-{audio_uuid}.wav', res, self.sample_rate)
+
+    def reload_wave_info(self):
+        """重新加载所有说话人信息"""
+        self.promote_wave_info.clear()
+        self._preload_all_wave_info()
+
+    def get_available_spk_ids(self):
+        """获取所有可用的说话人ID"""
+        return list(self.promote_wave_info.keys())
 
 
 def AutoModel(**kwargs):

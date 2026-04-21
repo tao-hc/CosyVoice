@@ -13,6 +13,7 @@ message Request{
     zeroshotRequest zero_shot_request = 2;
     crosslingualRequest cross_lingual_request = 3;
     instructRequest instruct_request = 4;
+    zeroshotByIdRequest zero_shot_by_id_request = 5;
   }
 }
 
@@ -25,6 +26,7 @@ message zeroshotRequest{
   string tts_text = 1;
   string prompt_text = 2;
   bytes prompt_audio = 3;
+  bool stream = 4; 
 }
 
 message crosslingualRequest{
@@ -36,6 +38,12 @@ message instructRequest{
   string tts_text = 1;
   string spk_id = 2;
   string instruct_text = 3;
+}
+
+message zeroshotByIdRequest{
+  string tts_text = 1;
+  string spk_id = 2;
+  bool stream = 3;
 }
 
 message Response{

@@ -309,9 +309,13 @@ class CosyVoice2Model(CosyVoiceModel):
         export_cosyvoice2_vllm(self.llm, model_dir, self.device)
         from vllm import EngineArgs, LLMEngine
         engine_args = EngineArgs(model=model_dir,
+                                 dtype='float16', #new added on 2026/2/10
                                  skip_tokenizer_init=True,
                                  enable_prompt_embeds=True,
-                                 gpu_memory_utilization=0.2)
+                                 gpu_memory_utilization=0.7, #adjust from 0.2 to 0.9, then to 0.5
+                                 additional_config={"torchair_graph_config":{"enabled":True}}, #new added on 2026/2/10
+                                 compilation_config={'cudagraph_capture_sizes':[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,32,64,128,512,1024,2048],"cudagraph_mode": "FULL"},
+                                 enable_prefix_caching=False)
         self.llm.vllm = LLMEngine.from_engine_args(engine_args)
         self.llm.lock = threading.Lock()
         del self.llm.llm.model.model.layers
@@ -369,8 +373,14 @@ class CosyVoice2Model(CosyVoiceModel):
             token_offset = 0
             prompt_token_pad = int(np.ceil(flow_prompt_speech_token.shape[1] / self.token_hop_len) * self.token_hop_len - flow_prompt_speech_token.shape[1])
             while True:
-                time.sleep(0.1)
+                time.sleep(0.05)
                 this_token_hop_len = self.token_hop_len + prompt_token_pad if token_offset == 0 else self.token_hop_len
+                if token_offset == 0: #将首包改为 20token
+                    #this_token_hop_len = 20
+                    this_token_hop_len = 10
+                    #this_token_hop_len = 9
+                    #print("len(self.tts_speech_token_dict[this_uuid]): ", len(self.tts_speech_token_dict[this_uuid]))
+                    #print("self.flow.pre_lookahead_len: ", self.flow.pre_lookahead_len)
                 if len(self.tts_speech_token_dict[this_uuid]) - token_offset >= this_token_hop_len + self.flow.pre_lookahead_len:
                     this_tts_speech_token = torch.tensor(self.tts_speech_token_dict[this_uuid][:token_offset + this_token_hop_len + self.flow.pre_lookahead_len]).unsqueeze(dim=0)
                     this_tts_speech = self.token2wav(token=this_tts_speech_token,
@@ -421,7 +431,9 @@ class CosyVoice3Model(CosyVoice2Model):
                  llm: torch.nn.Module,
                  flow: torch.nn.Module,
                  hift: torch.nn.Module,
-                 fp16: bool = False):
+                 fp16: bool = False,
+                 model_dir: str = None,
+                 graph_mode: bool = False):
         self.device = _get_device()
         self.llm = llm
         self.flow = flow
